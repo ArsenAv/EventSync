@@ -4,7 +4,7 @@ import { EventEmitter } from "./emitter";
 import { EventDelayedRepository } from "./event-repository";
 import { EventStatistics } from "./event-statistics";
 import { ResultsTester } from "./results-tester";
-import { triggerRandomly } from "./utils";
+import {awaitTimeout, triggerRandomly} from "./utils";
 
 const MAX_EVENTS = 1000;
 
@@ -57,33 +57,138 @@ function init() {
   time MAX_EVENTS have been fired.
 
 */
-
 class EventHandler extends EventStatistics<EventName> {
-  // Feel free to edit this class
-
   repository: EventRepository;
 
   constructor(emitter: EventEmitter<EventName>, repository: EventRepository) {
     super();
     this.repository = repository;
 
-    emitter.subscribe(EventName.EventA, () =>
-      this.repository.saveEventData(EventName.EventA, 1)
-    );
+    emitter.subscribe(EventName.EventA, () => this.handleEvent(EventName.EventA));
+    emitter.subscribe(EventName.EventB, () => this.handleEvent(EventName.EventB));
+
+    emitter.subscribe(EventName.EventA, () => this.handleReository(EventName.EventA));
+    emitter.subscribe(EventName.EventB, () => this.handleReository(EventName.EventB));
+
   }
+
+  private async handleReository(eventName: EventName) {
+    await this.repository.saveEventData(eventName)
+    this.repository.run();
+  }
+  private handleEvent(eventName: EventName) {
+  const currentCount = this.getStats(eventName) + 1;
+  this.setStats(eventName, currentCount);
+}
 }
 
-class EventRepository extends EventDelayedRepository<EventName> {
-  // Feel free to edit this class
 
-  async saveEventData(eventName: EventName, _: number) {
-    try {
-      await this.updateEventStatsBy(eventName, 1);
-    } catch (e) {
-      // const _error = e as EventRepositoryError;
-      // console.warn(error);
+
+export class EventRepository extends EventDelayedRepository<EventName> {
+  eventIsPassed: boolean;
+  synced: boolean;
+
+  awaitUntilHandler: boolean;
+  allEvents: Map<EventName, number>;
+  syncedEvents: Map<EventName , boolean>;
+
+  constructor() {
+    super();
+    this.eventIsPassed = true;
+    this.synced = false;
+    this.awaitUntilHandler = false;
+    this.allEvents = new Map<EventName, number>();
+    this.syncedEvents = new Map<EventName, boolean>();
+  }
+
+  run() {
+    setInterval(() => this.SyncEvents(), 2000)
+  }
+
+  addEvent(eventName: EventName) {
+    const count = (this.allEvents.get(eventName) || 0);
+
+    if(!(this.syncedEvents.get(eventName) || false)) {
+      this.setStats(eventName,this.getStats(eventName) + 1);
+    } else {
+      this.allEvents.set(eventName, count + 1);
     }
   }
+
+  async SyncEvents() {
+    if (!this.eventIsPassed) return;
+    this.eventIsPassed = false;
+
+    const allRequests: Array<Promise<void>> = [];
+    for (let i = 0; i < EVENT_NAMES.length; i++) {
+      const eventName = EVENT_NAMES[i];
+      if (eventName) {
+        allRequests.push(this.updateRequest(eventName));
+      }
+    }
+
+    Promise.all(allRequests).then(() => {
+      for (let i = 0; i < EVENT_NAMES.length; i++) {
+        const eventName = EVENT_NAMES[i];
+        if (eventName) {
+          this.syncedEvents.set(eventName, true);
+        }
+      }
+      this.eventIsPassed = true;
+    });
+  }
+  getEventCount(eventName : EventName) : number
+  {
+    return this.allEvents.get(eventName) || 0;
+  }
+  async saveEventData(eventName: EventName) {
+    this.addEvent(eventName);
+    await this.updateRequest(eventName);
+  }
+  async updateRequest(eventName: EventName) {
+    if (!this.awaitUntilHandler) {
+      let count = this.getEventCount(eventName);
+      if (count == 0) return;
+
+      try {
+        this.allEvents.set(eventName, 0);
+
+        if(!(this.syncedEvents.get(eventName) || false)) {
+          await this.updateEventStatsBy(eventName, 0);
+        } else {
+          await this.updateEventStatsBy(eventName, count);
+        }
+      } catch (errorMessage) {
+        await this.handleError(errorMessage, eventName, count);
+      }
+    } else {
+      await this.awaitUntil(eventName);
+    }
+  }
+  async handleError(errorMessage: string, eventName: EventName, count: number) {
+    if (errorMessage !== "Response delivery fail") {
+      this.allEvents.set(eventName, (this.allEvents.get(eventName) || 0) + count);
+    }
+
+    if (errorMessage === "Request fail") {
+      await this.updateRequest(eventName);
+    } else if (errorMessage === "Too many requests") {
+      this.awaitUntilHandler = true;
+      await awaitTimeout(100);
+      this.awaitUntilHandler = false;
+
+      await this.updateRequest(eventName);
+    }
+  }
+
+  async awaitUntil(eventName : EventName) {
+    while (this.awaitUntilHandler) {
+      await awaitTimeout(100);
+    }
+    await this.updateRequest(eventName);
+  }
 }
+
+
 
 init();
